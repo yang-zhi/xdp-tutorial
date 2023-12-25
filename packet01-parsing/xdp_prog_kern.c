@@ -17,6 +17,73 @@ struct hdr_cursor {
 	void *pos;
 };
 
+/*
+ *	struct vlan_hdr - vlan header
+ *	@h_vlan_TCI: priority and VLAN ID
+ *	@h_vlan_encapsulated_proto: packet type ID or len
+ */
+struct vlan_hdr {
+	__be16	h_vlan_TCI;
+	__be16	h_vlan_encapsulated_proto;
+};
+
+/* Allow users of header file to redefine VLAN max depth */
+#ifndef VLAN_MAX_DEPTH
+#define VLAN_MAX_DEPTH 2
+#endif
+
+static __always_inline int proto_is_vlan(__u16 h_proto)
+{
+	return !!(h_proto == bpf_htons(ETH_P_8021Q) ||
+		h_proto == bpf_htons(ETH_P_8021AD));
+}
+
+/* Notice, parse_ethhdr_vlan() will skip VLAN tags, by advancing nh->pos and returns
+ * next header EtherType, BUT the ethhdr pointer supplied still points to the
+ * Ethernet header. Thus, caller can look at eth->h_proto to see if this was a
+ * VLAN tagged packet.
+ */
+static __always_inline int parse_ethhdr_vlan(struct hdr_cursor *nh,
+											 void *data_end,
+											 struct ethhdr **ethhdr)
+{
+	struct ethhdr *eth = nh->pos;
+	int hdrsize = sizeof(*eth);
+	struct vlan_hdr *vlh;
+	__u16 h_proto;
+	int i;
+
+	/* Byte-count bounds check; check if current pointer + size of header
+	 * is after data_end.
+	 */
+	if (nh->pos + hdrsize > data_end)
+		return -1;
+
+	nh->pos += hdrsize;
+	*ethhdr = eth;
+	vlh = nh->pos;
+
+	/* Use loop unrolling to avoid the verifier restriction on loops;
+	 * support up to VLAN_MAX_DEPTH layers of VLAN encapsulation.
+	 */
+	#pragma unroll
+	for (i = 0; i < VLAN_MAX_DEPTH; i++) {
+		if (!proto_is_vlan(h_proto))
+			break;
+
+		if (vlh + 1 > data_end)
+			break;
+
+		h_proto = vlh->h_vlan_encapsulated_proto;
+
+		vlh++;
+	}
+
+	nh->pos = vlh;
+
+	return h_proto; /* network-byte-order */
+}
+
 /* Packet parsing helpers.
  *
  * Each helper parses a packet header, including doing bounds checking, and
@@ -30,19 +97,7 @@ static __always_inline int parse_ethhdr(struct hdr_cursor *nh,
 					void *data_end,
 					struct ethhdr **ethhdr)
 {
-	struct ethhdr *eth = nh->pos;
-	int hdrsize = sizeof(*eth);
-
-	/* Byte-count bounds check; check if current pointer + size of header
-	 * is after data_end.
-	 */
-	if (eth + 1 > data_end)
-		return -1;
-
-	nh->pos += hdrsize;
-	*ethhdr = eth;
-
-	return eth->h_proto; /* network-byte-order */
+	return parse_ethhdr_vlan(nh, data_end, ethhdr);
 }
 
 /* Assignment 2: Implement and use this */
