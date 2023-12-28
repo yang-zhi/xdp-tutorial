@@ -64,6 +64,41 @@ static __always_inline int vlan_tag_pop(struct xdp_md *ctx, struct ethhdr *eth)
 static __always_inline int vlan_tag_push(struct xdp_md *ctx,
 					 struct ethhdr *eth, int vlid)
 {
+	void *data_end = (void *)(long)ctx->data_end;
+	struct ethhdr eth_cpy;
+	struct vlan_hdr *vlh;
+
+	/* First copy the original Ethernet header */
+	__builtin_memcpy(&eth_cpy, eth, sizeof(eth_cpy));
+
+	/* Then add space in front of the packet */
+	if (bpf_xdp_adjust_head(ctx, 0 - (int)sizeof(*vlh)))
+		return -1;
+
+	/* Need to re-evaluate data_end and data after head adjustment, and
+	 * bounds check, even though we know there is enough space (as we
+	 * increased it).
+	 */
+	data_end = (void *)(long)ctx->data_end;
+	eth = (void *)(long)ctx->data;
+
+	if (eth + 1 > data_end)
+		return -1;
+
+	/* Copy back Ethernet header in the right place, populate VLAN tag with
+	 * ID and proto, and set outer Ethernet header to VLAN type.
+	 */
+	__builtin_memcpy(eth, &eth_cpy, sizeof(*eth));
+
+	vlh = (void *)(eth + 1);
+
+	if (vlh + 1 > data_end)
+		return -1;
+
+	vlh->h_vlan_TCI = bpf_htons(vlid);
+	vlh->h_vlan_encapsulated_proto = eth->h_proto;
+
+	eth->h_proto = bpf_htons(ETH_P_8021Q);
 	return 0;
 }
 
